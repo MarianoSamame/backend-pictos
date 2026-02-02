@@ -16,7 +16,9 @@ api_key = os.getenv("GOOGLE_API_KEY")
 if not api_key:
     print("⚠️ ADVERTENCIA: No se encontró GOOGLE_API_KEY.")
 
+# CLIENTE GLOBAL (IA) - Este es el "client" original
 client = genai.Client(api_key=api_key)
+
 app = FastAPI(title="API Pictogramas Muna con Memoria")
 
 app.add_middleware(
@@ -27,12 +29,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- GESTIÓN DE MEMORIA (El Cerebro que Aprende) 🧠 ---
+# --- GESTIÓN DE MEMORIA ---
 ARCHIVO_MEMORIA = "memoria_correcciones.json"
 
 
 def cargar_memoria():
-    """Lee las correcciones aprendidas del archivo JSON."""
     if not os.path.exists(ARCHIVO_MEMORIA):
         return {}
     try:
@@ -43,13 +44,11 @@ def cargar_memoria():
 
 
 def guardar_en_memoria(palabra_original, termino_arasaac):
-    """Guarda una nueva enseñanza."""
     memoria = cargar_memoria()
-    # Normalizamos a minúsculas para que 'Papá' y 'papá' sean lo mismo
     memoria[palabra_original.lower().strip()] = termino_arasaac.strip()
     with open(ARCHIVO_MEMORIA, "w", encoding="utf-8") as f:
         json.dump(memoria, f, ensure_ascii=False, indent=2)
-    print(f"🧠 APRENDIDO: '{palabra_original}' ahora siempre será '{termino_arasaac}'")
+    print(f"🧠 APRENDIDO: '{palabra_original}' -> '{termino_arasaac}'")
 
 
 # --- MODELOS ---
@@ -63,10 +62,10 @@ class RegenerarRequest(BaseModel):
 
 
 # --- LÓGICA DE BÚSQUEDA ---
-async def buscar_pictograma_async(client_http, termino):
+async def buscar_pictograma_async(http_client_instance, termino):
     url = f"https://api.arasaac.org/api/pictograms/es/bestsearch/{termino}"
     try:
-        response = await client_http.get(url, timeout=4)
+        response = await http_client_instance.get(url, timeout=4)
         if response.status_code == 200 and response.json():
             data = response.json()
             if data:
@@ -77,17 +76,14 @@ async def buscar_pictograma_async(client_http, termino):
     return None
 
 
-# --- IA PRINCIPAL (AHORA CON MEMORIA) ---
+# --- IA PRINCIPAL ---
 def inteligencia_artificial(frase):
-    # 1. Cargamos lo aprendido
     memoria = cargar_memoria()
-
-    # 2. Convertimos la memoria en texto para el prompt
     texto_memoria = ""
     if memoria:
-        texto_memoria = "REGLAS APRENDIDAS (PRIORIDAD ABSOLUTA - ÚSALAS SIEMPRE):\n"
+        texto_memoria = "REGLAS APRENDIDAS (PRIORIDAD ABSOLUTA):\n"
         for original, termino in memoria.items():
-            texto_memoria += f"- Si aparece la palabra '{original}' -> TU BUSCAS: '{termino}'\n"
+            texto_memoria += f"- '{original}' -> BUSCAR: '{termino}'\n"
 
     prompt = f"""
     Eres un experto en SAAC. Traduce la frase a conceptos visuales para ARASAAC.
@@ -147,6 +143,7 @@ async def regenerar_picto(request: RegenerarRequest):
     """
 
     try:
+        # Aquí usamos el cliente GLOBAL 'client' sin problemas
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
@@ -155,15 +152,19 @@ async def regenerar_picto(request: RegenerarRequest):
         data_ia = json.loads(response.text)
         nuevo_termino = data_ia.get("busqueda_arasaac", request.aclaracion)
 
-        # --- AQUÍ OCURRE EL APRENDIZAJE ---
-        # Guardamos que "papá" ahora significa "padre" (o lo que haya devuelto la IA)
         guardar_en_memoria(request.original, nuevo_termino)
-        # ----------------------------------
 
-        async with httpx.AsyncClient() as client:
-            nuevo_url = await buscar_pictograma_async(client, nuevo_termino)
+        # CORRECCIÓN AQUÍ: Renombramos 'client' a 'http_client' para no chocar
+        async with httpx.AsyncClient() as http_client:
+            nuevo_url = await buscar_pictograma_async(http_client, nuevo_termino)
 
         return {"status": "ok", "nuevo_url": nuevo_url, "termino_usado": nuevo_termino}
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
