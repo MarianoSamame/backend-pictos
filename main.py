@@ -14,15 +14,11 @@ load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
 
 if not api_key:
-    print("⚠️ ADVERTENCIA: No se encontró GOOGLE_API_KEY. Asegúrate de configurarla en Render.")
+    print("⚠️ ADVERTENCIA: No se encontró GOOGLE_API_KEY.")
 
-# Cliente de Google Gemini
 client = genai.Client(api_key=api_key)
+app = FastAPI(title="API Pictogramas Muna con Memoria")
 
-# App FastAPI
-app = FastAPI(title="API Pictogramas Muna")
-
-# Configuración de CORS (Permite que la Web App hable con el servidor)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,22 +27,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- GESTIÓN DE MEMORIA (El Cerebro que Aprende) 🧠 ---
+ARCHIVO_MEMORIA = "memoria_correcciones.json"
 
-# --- MODELOS DE DATOS ---
 
+def cargar_memoria():
+    """Lee las correcciones aprendidas del archivo JSON."""
+    if not os.path.exists(ARCHIVO_MEMORIA):
+        return {}
+    try:
+        with open(ARCHIVO_MEMORIA, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def guardar_en_memoria(palabra_original, termino_arasaac):
+    """Guarda una nueva enseñanza."""
+    memoria = cargar_memoria()
+    # Normalizamos a minúsculas para que 'Papá' y 'papá' sean lo mismo
+    memoria[palabra_original.lower().strip()] = termino_arasaac.strip()
+    with open(ARCHIVO_MEMORIA, "w", encoding="utf-8") as f:
+        json.dump(memoria, f, ensure_ascii=False, indent=2)
+    print(f"🧠 APRENDIDO: '{palabra_original}' ahora siempre será '{termino_arasaac}'")
+
+
+# --- MODELOS ---
 class FraseRequest(BaseModel):
     texto: str
 
 
 class RegenerarRequest(BaseModel):
-    original: str  # La palabra que falló (ej: "papá")
-    aclaracion: str  # Tu corrección (ej: "padre de familia hombre")
+    original: str
+    aclaracion: str
 
 
-# --- LÓGICA DE BÚSQUEDA (ASÍNCRONA) ---
-
+# --- LÓGICA DE BÚSQUEDA ---
 async def buscar_pictograma_async(client_http, termino):
-    """Busca en ARASAAC de forma asíncrona (no bloquea el servidor)."""
     url = f"https://api.arasaac.org/api/pictograms/es/bestsearch/{termino}"
     try:
         response = await client_http.get(url, timeout=4)
@@ -55,21 +72,32 @@ async def buscar_pictograma_async(client_http, termino):
             if data:
                 id_picto = data[0]['_id']
                 return f"https://static.arasaac.org/pictograms/{id_picto}/{id_picto}_500.png"
-    except Exception as e:
-        print(f"Error buscando '{termino}': {e}")
+    except Exception:
+        pass
     return None
 
 
-# --- LÓGICA DE IA (TRADUCCIÓN PRINCIPAL) ---
-
+# --- IA PRINCIPAL (AHORA CON MEMORIA) ---
 def inteligencia_artificial(frase):
+    # 1. Cargamos lo aprendido
+    memoria = cargar_memoria()
+
+    # 2. Convertimos la memoria en texto para el prompt
+    texto_memoria = ""
+    if memoria:
+        texto_memoria = "REGLAS APRENDIDAS (PRIORIDAD ABSOLUTA - ÚSALAS SIEMPRE):\n"
+        for original, termino in memoria.items():
+            texto_memoria += f"- Si aparece la palabra '{original}' -> TU BUSCAS: '{termino}'\n"
+
     prompt = f"""
-    Eres un experto en SAAC. Traduce la frase coloquial a conceptos visuales simples para ARASAAC.
+    Eres un experto en SAAC. Traduce la frase a conceptos visuales para ARASAAC.
     FRASE: "{frase}"
-    REGLAS:
+
+    {texto_memoria}
+
+    REGLAS GENERALES:
     1. Simplifica gramática. Verbos en INFINITIVO.
-    2. CONTEXTO ARGENTINO: "Jardín"->buscar "escuela". "Seño"->buscar "profesora". "Rico"->buscar "gustar".
-    3. Elimina artículos/preposiciones inútiles.
+    2. CONTEXTO ARGENTINO: "Jardín"->"escuela infantil", "Seño"->"profesora".
 
     SALIDA JSON: [ {{"original": "palabra", "busqueda_arasaac": "termino"}} ]
     """
@@ -78,9 +106,7 @@ def inteligencia_artificial(frase):
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
+            config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         return json.loads(response.text)
     except Exception as e:
@@ -92,83 +118,52 @@ def inteligencia_artificial(frase):
 
 @app.post("/traducir")
 async def traducir_frase(request: FraseRequest):
-    print(f"📩 Recibido para traducir: {request.texto}")
-
-    # 1. Procesar con IA (Obtener los términos de búsqueda)
+    print(f"📩 Traduciendo: {request.texto}")
     conceptos = inteligencia_artificial(request.texto)
-
-    # Normalización si la IA devuelve un diccionario envuelto
     lista_conceptos = conceptos if isinstance(conceptos, list) else list(conceptos.values())[0]
 
-    # 2. Búsqueda Paralela (Turbo) 🚀
     async with httpx.AsyncClient() as http_client:
-        tareas = []
-        for item in lista_conceptos:
-            termino = item.get('busqueda_arasaac', item.get('original'))
-            tareas.append(buscar_pictograma_async(http_client, termino))
+        tareas = [buscar_pictograma_async(http_client, item.get('busqueda_arasaac', item.get('original'))) for item in
+                  lista_conceptos]
+        urls = await asyncio.gather(*tareas)
 
-        # Ejecutar todas las búsquedas a la vez
-        urls_imagenes = await asyncio.gather(*tareas)
-
-    # 3. Armar respuesta final
-    resultado_final = []
+    resultado = []
     for i, item in enumerate(lista_conceptos):
-        url = urls_imagenes[i]
-        if url:
-            resultado_final.append({
-                "palabra": item.get('original'),
-                "imagen": url
-            })
+        if urls[i]:
+            resultado.append({"palabra": item.get('original'), "imagen": urls[i]})
 
-    return {"status": "ok", "data": resultado_final}
+    return {"status": "ok", "data": resultado}
 
 
 @app.post("/regenerar")
 async def regenerar_picto(request: RegenerarRequest):
-    print(f"🔄 Regenerando '{request.original}' con nota: {request.aclaracion}")
+    print(f"🔄 Corrigiendo: '{request.original}' con nota: '{request.aclaracion}'")
 
-    # 1. Usamos la IA para entender la corrección del usuario
     prompt = f"""
-    El usuario quiere cambiar un pictograma incorrecto.
-    Palabra original: "{request.original}"
-    Aclaración del usuario: "{request.aclaracion}"
-
-    Tu tarea: Basado en la aclaración, dame UN ÚNICO término de búsqueda para ARASAAC.
-    Ejemplo: Si original es "papá" y aclaración es "padre de familia", tu respuesta es: "padre".
-    Ejemplo: Si original es "banco" y aclaración es "para sentarse", tu respuesta es: "banco parque".
-
-    Responde SOLAMENTE un JSON: {{ "busqueda_arasaac": "termino" }}
+    Usuario corrige pictograma.
+    Original: "{request.original}"
+    Aclaración: "{request.aclaracion}"
+    Dame SOLO el término de búsqueda exacto para ARASAAC en JSON: {{ "busqueda_arasaac": "termino" }}
     """
 
     try:
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
+            config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         data_ia = json.loads(response.text)
-        # Obtenemos el término limpio o usamos la aclaración si falla algo
-        termino_nuevo = data_ia.get("busqueda_arasaac", request.aclaracion)
+        nuevo_termino = data_ia.get("busqueda_arasaac", request.aclaracion)
 
-        # 2. Buscamos la nueva imagen
-        async with httpx.AsyncClient() as http_client:
-            nuevo_url = await buscar_pictograma_async(http_client, termino_nuevo)
+        # --- AQUÍ OCURRE EL APRENDIZAJE ---
+        # Guardamos que "papá" ahora significa "padre" (o lo que haya devuelto la IA)
+        guardar_en_memoria(request.original, nuevo_termino)
+        # ----------------------------------
 
-        return {
-            "status": "ok",
-            "nuevo_url": nuevo_url,
-            "termino_usado": termino_nuevo
-        }
+        async with httpx.AsyncClient() as client:
+            nuevo_url = await buscar_pictograma_async(client, nuevo_termino)
+
+        return {"status": "ok", "nuevo_url": nuevo_url, "termino_usado": nuevo_termino}
 
     except Exception as e:
-        print(f"Error regenerando: {e}")
         return {"status": "error", "message": str(e)}
-
-
-# Si se ejecuta directo para pruebas locales
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
