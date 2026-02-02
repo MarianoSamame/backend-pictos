@@ -1,8 +1,9 @@
 import os
 import json
-import requests
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware  # <--- IMPORTANTE
+import asyncio
+import httpx  # <--- La nueva librería turbo
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
@@ -12,21 +13,18 @@ from google.genai import types
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
 
-# Permitimos que arranque sin key localmente, pero fallará si intentas usarlo
 if not api_key:
-    print("⚠️ ADVERTENCIA: No se encontró GOOGLE_API_KEY. Asegúrate de configurarla en Render.")
+    print("⚠️ ADVERTENCIA: No se encontró GOOGLE_API_KEY.")
 
-# Cliente actualizado
 client = genai.Client(api_key=api_key)
 
-app = FastAPI(title="API Pictogramas para Hija")
+app = FastAPI(title="API Pictogramas Turbo")
 
-# --- CONFIGURACIÓN DE CORS (CRÍTICO PARA V0 Y WEB APPS) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # "*" significa "Todos". En el futuro pondremos solo tu dominio.
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Permitir POST, GET, OPTIONS, etc.
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -35,16 +33,20 @@ class FraseRequest(BaseModel):
     texto: str
 
 
-# --- LÓGICA ---
-def buscar_pictograma_arasaac(termino):
+# --- FUNCIONES DE LÓGICA ---
+
+# Versión ASÍNCRONA de la búsqueda (La clave de la velocidad)
+async def buscar_pictograma_async(client_http, termino):
     url = f"https://api.arasaac.org/api/pictograms/es/bestsearch/{termino}"
     try:
-        res = requests.get(url, timeout=3)
-        if res.status_code == 200 and res.json():
-            id_picto = res.json()[0]['_id']
-            return f"https://static.arasaac.org/pictograms/{id_picto}/{id_picto}_500.png"
-    except Exception:
-        pass
+        response = await client_http.get(url, timeout=3)  # No bloquea, espera en paralelo
+        if response.status_code == 200 and response.json():
+            data = response.json()
+            if data:
+                id_picto = data[0]['_id']
+                return f"https://static.arasaac.org/pictograms/{id_picto}/{id_picto}_500.png"
+    except Exception as e:
+        print(f"Error buscando {termino}: {e}")
     return None
 
 
@@ -76,18 +78,33 @@ def inteligencia_artificial(frase):
 @app.post("/traducir")
 async def traducir_frase(request: FraseRequest):
     print(f"📩 Recibido: {request.texto}")
+
+    # 1. IA (Esto sigue siendo secuencial, pero es rápido)
     conceptos = inteligencia_artificial(request.texto)
 
-    resultado_final = []
+    # Normalización
     lista_conceptos = conceptos if isinstance(conceptos, list) else list(conceptos.values())[0]
 
-    for item in lista_conceptos:
-        termino = item.get('busqueda_arasaac', item.get('original'))
-        url = buscar_pictograma_arasaac(termino)
+    # 2. BÚSQUEDA PARALELA 🚀
+    # Creamos un cliente asíncrono y lanzamos todas las peticiones a la vez
+    async with httpx.AsyncClient() as http_client:
+        tareas = []
+        for item in lista_conceptos:
+            termino = item.get('busqueda_arasaac', item.get('original'))
+            # Encolamos la tarea, no la ejecutamos todavía
+            tareas.append(buscar_pictograma_async(http_client, termino))
+
+        # ¡FUEGO! Ejecutamos todas juntas y esperamos
+        urls_imagenes = await asyncio.gather(*tareas)
+
+    # 3. Reconstruir el resultado
+    resultado_final = []
+    for i, item in enumerate(lista_conceptos):
+        url = urls_imagenes[i]
         if url:
             resultado_final.append({
                 "palabra": item.get('original'),
                 "imagen": url
             })
 
-    return {"status": "ok", "data": resultado_final}
+    return {"status": "ok", "data": resultado_final}git add .
