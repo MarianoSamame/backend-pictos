@@ -107,4 +107,4 @@ async def traducir_frase(request: FraseRequest):
                 "imagen": url
             })
 
-    return {"status": "ok", "data": resultado_final}git add .
+    return {"status": "ok", "data": resultado_final}
