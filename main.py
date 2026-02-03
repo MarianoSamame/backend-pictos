@@ -76,26 +76,73 @@ async def buscar_pictograma_async(http_client_instance, termino):
     return None
 
 
-# --- IA PRINCIPAL ---
+# --- DICCIONARIO CULTURAL (ARGENTINISMOS) ---
+# Esto ayuda a la IA a entender el contexto local antes de filtrar
+DICCIONARIO_ARGENTO = {
+    "hamaca": "columpio",
+    "colectivo": "autobús",
+    "bondi": "autobús",
+    "subte": "metro",
+    "tacho": "papelera",
+    "pieza": "dormitorio",
+    "remera": "camiseta",
+    "zapatillas": "deportivas",
+    "ojotas": "chanclas",
+    "jardín": "escuela infantil",
+    "seño": "profesora",
+    "pizarrón": "pizarra",
+    "pochoclos": "palomitas maíz",
+    "facturas": "bollería",
+    "pancho": "perrito caliente",
+    "pileta": "piscina",
+    "laburo": "trabajo"
+}
+
+
+# --- IA PRINCIPAL (FILTRO DE RUIDO + TRADUCCIÓN) ---
 def inteligencia_artificial(frase):
     memoria = cargar_memoria()
+
+    # 1. Preparar Memoria (Correcciones previas)
     texto_memoria = ""
     if memoria:
-        texto_memoria = "REGLAS APRENDIDAS (PRIORIDAD ABSOLUTA):\n"
+        texto_memoria = "TUS CORRECCIONES PREVIAS (MÁXIMA PRIORIDAD):\n"
         for original, termino in memoria.items():
             texto_memoria += f"- '{original}' -> BUSCAR: '{termino}'\n"
 
+    # 2. Preparar Diccionario Argento
+    texto_argento = "DICCIONARIO ARGENTINO (SEGUNDA PRIORIDAD):\n"
+    for arg, esp in DICCIONARIO_ARGENTO.items():
+        texto_argento += f"- Si dice '{arg}' -> BUSCAR: '{esp}'\n"
+
     prompt = f"""
-    Eres un experto en SAAC. Traduce la frase a conceptos visuales para ARASAAC.
-    FRASE: "{frase}"
+    Eres un experto en SAAC para niños. Tu objetivo es extraer SOLO LOS CONCEPTOS VISUALES CLAVE.
+
+    FRASE ORIGINAL: "{frase}"
 
     {texto_memoria}
 
-    REGLAS GENERALES:
-    1. Simplifica gramática. Verbos en INFINITIVO.
-    2. CONTEXTO ARGENTINO: "Jardín"->"escuela infantil", "Seño"->"profesora".
+    {texto_argento}
 
-    SALIDA JSON: [ {{"original": "palabra", "busqueda_arasaac": "termino"}} ]
+    REGLAS DE ORO (FILTRADO AGRESIVO):
+    1. ELIMINA PALABRAS "BASURA" (Stopwords):
+       - BORRA artículos: el, la, los, las, un, una.
+       - BORRA preposiciones irrelevantes: a, de, en, por, para (salvo que cambien el sentido radicalmente).
+       - BORRA el verbo "ser/estar" si es auxiliar (ej: "es lindo" -> solo "lindo").
+       - BORRA conectores como "que".
+
+    2. SIMPLIFICACIÓN EXTREMA:
+       - Verbos SIEMPRE en INFINITIVO (Ej: "vamos" -> "ir").
+       - Sustantivos en SINGULAR (salvo que sea plural específico).
+
+    3. EJEMPLOS DE COMPORTAMIENTO ESPERADO:
+       - Frase: "Mañana vamos al jardín"
+       - Resultado: "mañana", "ir", "escuela infantil" (Fíjate que NO está "vamos", ni "a", ni "el").
+
+       - Frase: "Quiero la manzana roja"
+       - Resultado: "querer", "manzana", "rojo".
+
+    SALIDA JSON: [ {{"original": "palabra_clave", "busqueda_arasaac": "termino_visual"}} ]
     """
 
     try:
@@ -108,7 +155,6 @@ def inteligencia_artificial(frase):
     except Exception as e:
         print(f"Error IA: {e}")
         return []
-
 
 # --- ENDPOINTS ---
 
